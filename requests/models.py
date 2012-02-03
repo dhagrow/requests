@@ -15,6 +15,7 @@ from .structures import CaseInsensitiveDict
 from .status_codes import codes
 
 from .auth import HTTPBasicAuth, HTTPProxyAuth
+from .packages.oreos.cookiejar import CookieJar
 from .packages.urllib3.response import HTTPResponse
 from .packages.urllib3.exceptions import MaxRetryError
 from .packages.urllib3.exceptions import SSLError as _SSLError
@@ -114,7 +115,14 @@ class Request(object):
         self.auth = auth
 
         #: CookieJar to attach to :class:`Request <Request>`.
-        self.cookies = dict(cookies or [])
+        if isinstance(cookies, CookieJar):
+            self.cookies = cookies
+        else:
+            self.cookies = CookieJar()
+            
+            # Add passed cookies in.
+            if cookies is not None:
+                self.cookies.update(cookies)
 
         #: Dictionary of configurations for this request.
         self.config = dict(config or [])
@@ -169,42 +177,35 @@ class Request(object):
             # Pass settings over.
             response.config = self.config
 
+            # Save original response for later.
+            response.raw = resp
+            response.url = self.full_url
+
             if resp:
 
                 # Fallback to None if there's no status_code, for whatever reason.
                 response.status_code = getattr(resp, 'status', None)
-
+                
                 # Make headers case-insensitive.
                 response.headers = CaseInsensitiveDict(getattr(resp, 'headers', None))
 
                 # Set encoding.
                 response.encoding = get_encoding_from_headers(response.headers)
 
-                # Start off with our local cookies.
-                cookies = self.cookies or dict()
-
                 # Add new cookies from the server.
-                if 'set-cookie' in response.headers:
-                    cookie_header = response.headers['set-cookie']
-                    cookies = dict_from_string(cookie_header)
+                self.cookies.extract_cookies(response, self)
 
                 # Save cookies in Response.
-                response.cookies = cookies
+                response.cookies = self.cookies
 
                 # No exceptions were harmed in the making of this request.
                 response.error = getattr(resp, 'error', None)
-
-            # Save original response for later.
-            response.raw = resp
-            response.url = self.full_url
 
             return response
 
         history = []
 
         r = build(resp)
-
-        self.cookies.update(r.cookies)
 
         if r.status_code in REDIRECT_STATI and not self.redirect:
             while (('location' in r.headers) and
@@ -264,13 +265,11 @@ class Request(object):
 
                 request.send()
                 r = request.response
-                self.cookies.update(r.cookies)
 
             r.history = history
 
         self.response = r
         self.response.request = self
-        self.response.cookies.update(self.cookies)
 
 
     @staticmethod
@@ -488,19 +487,13 @@ class Request(object):
 
         if not self.sent or anyway:
 
-            if self.cookies:
+            # Skip if 'cookie' header is explicitly set.
+            if 'cookie' not in self.headers:
 
-                # Skip if 'cookie' header is explicitly set.
-                if 'cookie' not in self.headers:
-
-                    # Simple cookie with our dict.
-                    c = SimpleCookie()
-                    for (k, v) in list(self.cookies.items()):
-                        c[k] = v
-
-                    # Turn it into a header.
-                    cookie_header = c.output(header='', sep='; ').strip()
-
+                # Turn it into a header.
+                cookie_header = self.cookies.get_header(self)
+                
+                if cookie_header:
                     # Attach Cookie header to request.
                     self.headers['Cookie'] = cookie_header
 
